@@ -1408,174 +1408,15 @@ function localDateString(date = new Date()) {
   return `${year}-${month}-${day}`;
 }
 
-
-let deliveryCalendarMonthDate = null;
-let deliveryCalendarBodyOverflow = "";
-
-function parseLocalDate(value) {
-  const match = String(value || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (!match) return null;
-  const year = Number(match[1]);
-  const month = Number(match[2]) - 1;
-  const day = Number(match[3]);
-  const date = new Date(year, month, day);
-  return Number.isNaN(date.getTime()) ? null : date;
-}
-
-function calendarMonthStart(date = new Date()) {
-  return new Date(date.getFullYear(), date.getMonth(), 1);
-}
-
-function formatDeliveryDate(value) {
-  const date = parseLocalDate(value);
-  if (!date) return "Выберите дату";
-  return date.toLocaleDateString("ru-RU", {
-    day: "numeric",
-    month: "long",
-    weekday: "short"
-  });
-}
-
-function formatCalendarMonth(date) {
-  const label = date.toLocaleDateString("ru-RU", {
-    month: "long",
-    year: "numeric"
-  });
-  return label.charAt(0).toUpperCase() + label.slice(1);
-}
-
-function deliveryCalendarMinValue() {
-  return document.querySelector("#deliveryDate")?.min || localDateString();
-}
-
-function updateDeliveryDateDisplay() {
-  const input = document.querySelector("#deliveryDate");
-  const text = document.querySelector("#deliveryDateText");
-  if (!input || !text) return;
-  text.textContent = formatDeliveryDate(input.value);
-  if (!document.querySelector("#deliveryCalendarOverlay")?.hidden) {
-    renderDeliveryCalendar();
-  }
-}
-
-function setDeliveryDateValue(value, { close = false } = {}) {
+function initDeliveryDateInput() {
   const input = document.querySelector("#deliveryDate");
   if (!input) return;
-  const min = deliveryCalendarMinValue();
-  input.value = value < min ? min : value;
-  input.dispatchEvent(new Event("change", { bubbles: true }));
-  updateDeliveryDateDisplay();
-  tg?.HapticFeedback?.selectionChanged?.();
-  if (close) closeDeliveryCalendar();
-}
 
-function openDeliveryCalendar() {
-  const overlay = document.querySelector("#deliveryCalendarOverlay");
-  const button = document.querySelector("#deliveryDateButton");
-  const input = document.querySelector("#deliveryDate");
-  if (!overlay || !button || !input) return;
-
-  const selectedDate = parseLocalDate(input.value) || parseLocalDate(input.min) || new Date();
-  deliveryCalendarMonthDate = calendarMonthStart(selectedDate);
-  renderDeliveryCalendar();
-
-  deliveryCalendarBodyOverflow = document.body.style.overflow;
-  document.body.style.overflow = "hidden";
-  overlay.hidden = false;
-  button.setAttribute("aria-expanded", "true");
-  window.requestAnimationFrame(() => document.querySelector("#deliveryCalendarDays button.is-selected:not(:disabled)")?.focus?.());
-}
-
-function closeDeliveryCalendar() {
-  const overlay = document.querySelector("#deliveryCalendarOverlay");
-  const button = document.querySelector("#deliveryDateButton");
-  if (!overlay || overlay.hidden) return;
-  overlay.hidden = true;
-  document.body.style.overflow = deliveryCalendarBodyOverflow;
-  button?.setAttribute("aria-expanded", "false");
-  button?.focus?.({ preventScroll: true });
-}
-
-function renderDeliveryCalendar() {
-  const days = document.querySelector("#deliveryCalendarDays");
-  const monthLabel = document.querySelector("#deliveryCalendarMonth");
-  const prevButton = document.querySelector("#deliveryCalendarPrev");
-  const input = document.querySelector("#deliveryDate");
-  if (!days || !monthLabel || !prevButton || !input) return;
-
-  const minValue = deliveryCalendarMinValue();
-  const minDate = parseLocalDate(minValue) || new Date();
-  const todayValue = localDateString();
-  const selectedValue = input.value;
-  const monthDate = calendarMonthStart(deliveryCalendarMonthDate || parseLocalDate(selectedValue) || minDate);
-  deliveryCalendarMonthDate = monthDate;
-
-  monthLabel.textContent = formatCalendarMonth(monthDate);
-  prevButton.disabled = monthDate <= calendarMonthStart(minDate);
-  days.innerHTML = "";
-
-  const firstWeekday = (monthDate.getDay() + 6) % 7;
-  for (let index = 0; index < firstWeekday; index += 1) {
-    days.append(document.createElement("span"));
-  }
-
-  const daysInMonth = new Date(monthDate.getFullYear(), monthDate.getMonth() + 1, 0).getDate();
-  for (let day = 1; day <= daysInMonth; day += 1) {
-    const date = new Date(monthDate.getFullYear(), monthDate.getMonth(), day);
-    const value = localDateString(date);
-    const button = document.createElement("button");
-    button.type = "button";
-    button.textContent = String(day);
-    button.dataset.calendarDate = value;
-    button.disabled = value < minValue;
-    button.classList.toggle("is-today", value === todayValue);
-    button.classList.toggle("is-selected", value === selectedValue);
-    button.setAttribute("aria-label", date.toLocaleDateString("ru-RU", {
-      day: "numeric",
-      month: "long",
-      year: "numeric",
-      weekday: "long"
-    }));
-    if (value === selectedValue) button.setAttribute("aria-current", "date");
-    days.append(button);
-  }
-}
-
-function shiftDeliveryCalendarMonth(direction) {
-  const base = deliveryCalendarMonthDate || calendarMonthStart(new Date());
-  deliveryCalendarMonthDate = new Date(base.getFullYear(), base.getMonth() + direction, 1);
-  renderDeliveryCalendar();
-}
-
-function initDeliveryCalendar() {
-  const button = document.querySelector("#deliveryDateButton");
-  const input = document.querySelector("#deliveryDate");
-  const prevButton = document.querySelector("#deliveryCalendarPrev");
-  const nextButton = document.querySelector("#deliveryCalendarNext");
-  const days = document.querySelector("#deliveryCalendarDays");
-  if (!button || !input) return;
-
-  button.addEventListener("click", openDeliveryCalendar);
-  input.addEventListener("change", updateDeliveryDateDisplay);
-  prevButton?.addEventListener("click", () => shiftDeliveryCalendarMonth(-1));
-  nextButton?.addEventListener("click", () => shiftDeliveryCalendarMonth(1));
-  days?.addEventListener("click", (event) => {
-    const dayButton = event.target.closest("[data-calendar-date]");
-    if (!dayButton || dayButton.disabled) return;
-    setDeliveryDateValue(dayButton.dataset.calendarDate, { close: true });
+  input.addEventListener("change", () => {
+    if (input.min && input.value && input.value < input.min) {
+      input.value = input.min;
+    }
   });
-  document.querySelectorAll("[data-calendar-close]").forEach((closeButton) => {
-    closeButton.addEventListener("click", closeDeliveryCalendar);
-  });
-  document.querySelectorAll("[data-calendar-preset]").forEach((presetButton) => {
-    presetButton.addEventListener("click", () => {
-      const base = presetButton.dataset.calendarPreset === "tomorrow"
-        ? new Date(Date.now() + 86400000)
-        : new Date();
-      setDeliveryDateValue(localDateString(base), { close: true });
-    });
-  });
-  updateDeliveryDateDisplay();
 }
 
 async function submitOrder(event) {
@@ -1700,7 +1541,6 @@ function setDefaultFormValues() {
   const dateInput = document.querySelector("#deliveryDate");
   dateInput.min = localDateString();
   if (!dateInput.value) dateInput.value = localDateString(new Date(Date.now() + 86400000));
-  updateDeliveryDateDisplay();
   document.querySelector('input[name="delivery_type"][value="delivery"]').checked = true;
   updateDeliveryFields();
   updateRecipientFields();
@@ -4553,10 +4393,6 @@ document.addEventListener("click", (event) => {
 });
 
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && !document.querySelector("#deliveryCalendarOverlay")?.hidden) {
-    closeDeliveryCalendar();
-    return;
-  }
   if (event.key === "Escape" && !document.querySelector("#adminProductEditor")?.hidden) {
     closeAdminProductEditor();
     return;
@@ -4583,7 +4419,7 @@ document.addEventListener("keydown", (event) => {
 
 initTelegram();
 applyTelegramUser();
-initDeliveryCalendar();
+initDeliveryDateInput();
 setDefaultFormValues();
 applyMainHeroImage();
 products = appendAdminCreatedProducts(products).map((product) => mergeAdminOverride(product));
