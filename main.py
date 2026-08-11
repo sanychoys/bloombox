@@ -418,6 +418,7 @@ def seed_database(connection: sqlite3.Connection) -> None:
         "free_delivery_from": "5000",
         "currency": "RUB",
         "pickup_address": "",
+        "main_hero_image": "",
     }
 
     for key, value in settings.items():
@@ -1368,6 +1369,11 @@ def get_public_settings_sync() -> Dict[str, str]:
             "pickup_address": get_setting_text(
                 connection,
                 "pickup_address",
+                "",
+            ),
+            "main_hero_image": get_setting_text(
+                connection,
+                "main_hero_image",
                 "",
             ),
         }
@@ -6349,31 +6355,750 @@ async def webapp_image_handler(request: web.Request) -> web.StreamResponse:
     return response
 
 
+ADMIN_PRODUCT_TYPE_TO_CATEGORY_SLUG = {
+    "bouquets": "bouquets",
+    "postcards": "postcards",
+    "soft-toys": "soft-toys",
+}
+
+ADMIN_CATEGORY_SLUG_BY_NAME = {
+    "букеты": "bouquets",
+    "букет": "bouquets",
+    "открытки": "postcards",
+    "открытка": "postcards",
+    "мягкие игрушки": "soft-toys",
+    "игрушки": "soft-toys",
+    "игрушка": "soft-toys",
+}
+
+
+def admin_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on", "да", "включено"}:
+        return True
+    if normalized in {"0", "false", "no", "off", "нет", "выключено"}:
+        return False
+    return default
+
+
+def clean_admin_text(value: Any, max_length: int = 500) -> str:
+    text = str(value or "").strip()
+    if len(text) > max_length:
+        text = text[:max_length].strip()
+    return text
+
+
+def admin_category_id_from_payload(
+    connection: sqlite3.Connection,
+    data: Dict[str, Any],
+) -> int:
+    raw_category_id = data.get("category_id")
+    if raw_category_id not in (None, ""):
+        try:
+            category_id = int(raw_category_id)
+        except (TypeError, ValueError) as error:
+            raise ValueError("Некорректный тип товара") from error
+        row = connection.execute(
+            "SELECT id FROM categories WHERE id = ?",
+            (category_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("Тип товара не найден")
+        return int(row["id"])
+
+    raw_slug = (
+        data.get("category_slug")
+        or data.get("product_type")
+        or data.get("productType")
+        or data.get("category")
+        or data.get("collection")
+        or "bouquets"
+    )
+    normalized = str(raw_slug or "bouquets").strip().lower()
+    slug = ADMIN_PRODUCT_TYPE_TO_CATEGORY_SLUG.get(normalized)
+    if slug is None:
+        slug = ADMIN_CATEGORY_SLUG_BY_NAME.get(normalized, normalized)
+    if slug not in ADMIN_PRODUCT_TYPE_TO_CATEGORY_SLUG.values():
+        slug = "bouquets"
+
+    row = connection.execute(
+        "SELECT id FROM categories WHERE slug = ?",
+        (slug,),
+    ).fetchone()
+    if row is None:
+        raise ValueError("Тип товара не найден")
+    return int(row["id"])
+
+
+def normalize_admin_product_variants(data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    raw_variants = data.get("variants")
+    variants: List[Dict[str, Any]] = []
+
+    if isinstance(raw_variants, list):
+        for index, item in enumerate(raw_variants):
+            if not isinstance(item, dict):
+                continue
+            name = clean_admin_text(
+                item.get("name") or "Размер {0}".format(index + 1),
+                60,
+            )
+            if not name:
+                raise ValueError("Укажите название каждого размера")
+            try:
+                price = int(round(float(item.get("price", 0))))
+            except (TypeError, ValueError) as error:
+                raise ValueError("Проверьте цены размеров") from error
+            if price < 0:
+                raise ValueError("Цена не может быть отрицательной")
+            variants.append(
+                {
+                    "name": name,
+                    "price": price,
+                    "is_default": admin_bool(
+                        item.get("is_default", item.get("isDefault")),
+                        index == 0,
+                    ),
+                    "is_active": admin_bool(item.get("is_active"), True),
+                }
+            )
+    else:
+        prices = data.get("prices")
+        if isinstance(prices, dict) and prices:
+            preferred_order = ["S", "M", "L"]
+            ordered_names = [name for name in preferred_order if name in prices]
+            ordered_names.extend(
+                sorted(
+                    str(name)
+                    for name in prices
+                    if str(name) not in preferred_order
+                )
+            )
+            for index, name in enumerate(ordered_names):
+                try:
+                    price = int(round(float(prices[name])))
+                except (TypeError, ValueError) as error:
+                    raise ValueError("Проверьте цены размеров") from error
+                if price < 0:
+                    raise ValueError("Цена не может быть отрицательной")
+                variants.append(
+                    {
+                        "name": str(name),
+                        "price": price,
+                        "is_default": index == 0,
+                        "is_active": True,
+                    }
+                )
+
+    if not variants:
+        try:
+            base_price = int(round(float(
+                data.get("base_price")
+                or data.get("basePrice")
+                or data.get("price")
+                or 0
+            )))
+        except (TypeError, ValueError) as error:
+            raise ValueError("Проверьте цену товара") from error
+        if base_price < 0:
+            raise ValueError("Цена не может быть отрицательной")
+        variants.append(
+            {
+                "name": "M",
+                "price": base_price,
+                "is_default": True,
+                "is_active": True,
+            }
+        )
+
+    if len(variants) > 12:
+        raise ValueError("Для товара можно добавить не более 12 размеров")
+
+    seen_names: Set[str] = set()
+    result: List[Dict[str, Any]] = []
+    for variant in variants:
+        key = variant["name"].casefold()
+        if key in seen_names:
+            raise ValueError("Названия размеров не должны повторяться")
+        seen_names.add(key)
+        result.append(variant)
+
+    default_index = next(
+        (index for index, variant in enumerate(result) if variant["is_default"]),
+        0,
+    )
+    for index, variant in enumerate(result):
+        variant["is_default"] = index == default_index
+        variant["is_active"] = True
+    return result
+
+
+def replace_product_variants_sync(
+    connection: sqlite3.Connection,
+    product_id: int,
+    variants: List[Dict[str, Any]],
+) -> int:
+    connection.execute(
+        "DELETE FROM product_variants WHERE product_id = ?",
+        (product_id,),
+    )
+    for variant in variants:
+        connection.execute(
+            """
+            INSERT INTO product_variants(
+                product_id,
+                name,
+                price,
+                is_default,
+                is_active
+            )
+            VALUES (?, ?, ?, ?, 1)
+            """,
+            (
+                product_id,
+                variant["name"],
+                int(variant["price"]),
+                1 if variant["is_default"] else 0,
+            ),
+        )
+    return min(int(variant["price"]) for variant in variants)
+
+
+def set_product_primary_image_value_sync(
+    connection: sqlite3.Connection,
+    product_id: int,
+    image_url: str,
+) -> None:
+    image = clean_admin_text(image_url, 600000)
+    if image:
+        connection.execute(
+            "UPDATE product_images SET is_primary = 0 WHERE product_id = ?",
+            (product_id,),
+        )
+        connection.execute(
+            "DELETE FROM product_images WHERE product_id = ? AND image_url = ?",
+            (product_id, image),
+        )
+        connection.execute(
+            """
+            INSERT INTO product_images(
+                product_id,
+                image_url,
+                position,
+                is_primary
+            )
+            VALUES (?, ?, 0, 1)
+            """,
+            (product_id, image),
+        )
+        connection.execute(
+            """
+            UPDATE products
+            SET image_url = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (image, product_id),
+        )
+        return
+
+    connection.execute(
+        "DELETE FROM product_images WHERE product_id = ? AND is_primary = 1",
+        (product_id,),
+    )
+    next_image = connection.execute(
+        """
+        SELECT id, image_url
+        FROM product_images
+        WHERE product_id = ?
+        ORDER BY position ASC, id ASC
+        LIMIT 1
+        """,
+        (product_id,),
+    ).fetchone()
+    if next_image:
+        connection.execute(
+            "UPDATE product_images SET is_primary = 1, position = 0 WHERE id = ?",
+            (int(next_image["id"]),),
+        )
+        next_url: Optional[str] = str(next_image["image_url"])
+    else:
+        next_url = None
+    connection.execute(
+        """
+        UPDATE products
+        SET image_url = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (next_url, product_id),
+    )
+
+
+def set_product_featured_value_sync(
+    connection: sqlite3.Connection,
+    product_id: int,
+    featured: bool,
+) -> None:
+    if featured:
+        row = connection.execute(
+            "SELECT is_active FROM products WHERE id = ?",
+            (product_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("Товар не найден")
+        if not int(row["is_active"]):
+            connection.execute(
+                "DELETE FROM featured_products WHERE product_id = ?",
+                (product_id,),
+            )
+            _normalize_featured_positions_sync(connection)
+            return
+        existing = connection.execute(
+            "SELECT position FROM featured_products WHERE product_id = ?",
+            (product_id,),
+        ).fetchone()
+        if existing is None:
+            position = int(
+                connection.execute(
+                    "SELECT COALESCE(MAX(position), -1) + 1 FROM featured_products"
+                ).fetchone()[0]
+            )
+            connection.execute(
+                "INSERT INTO featured_products(product_id, position) VALUES (?, ?)",
+                (product_id, position),
+            )
+        return
+
+    connection.execute(
+        "DELETE FROM featured_products WHERE product_id = ?",
+        (product_id,),
+    )
+    _normalize_featured_positions_sync(connection)
+
+
+def create_admin_product_api_sync(data: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(data, dict):
+        raise ValueError("Некорректные данные товара")
+    name = clean_admin_text(data.get("name"), 120)
+    if not name:
+        raise ValueError("Укажите название товара")
+    description = clean_admin_text(data.get("description"), 1000)
+    composition = clean_admin_text(data.get("composition"), 1000)
+    image_url = clean_admin_text(
+        data.get("image_url") or data.get("image") or "",
+        600000,
+    )
+    variants = normalize_admin_product_variants(data)
+    is_active = admin_bool(data.get("is_active", data.get("active")), True)
+
+    with get_db_connection() as connection:
+        category_id = admin_category_id_from_payload(connection, data)
+        base_price = min(int(variant["price"]) for variant in variants)
+        slug = "product-{0}".format(uuid4().hex[:12])
+        cursor = connection.execute(
+            """
+            INSERT INTO products(
+                category_id,
+                name,
+                slug,
+                description,
+                composition,
+                base_price,
+                image_url,
+                is_active
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                category_id,
+                name,
+                slug,
+                description,
+                composition,
+                base_price,
+                image_url or None,
+                1 if is_active else 0,
+            ),
+        )
+        product_id = int(cursor.lastrowid)
+        replace_product_variants_sync(connection, product_id, variants)
+        if image_url:
+            set_product_primary_image_value_sync(connection, product_id, image_url)
+        if is_active and admin_bool(
+            data.get("is_featured", data.get("featured")),
+            False,
+        ):
+            set_product_featured_value_sync(connection, product_id, True)
+        connection.commit()
+    product = get_admin_product_api_sync(product_id)
+    if product is None:
+        raise ValueError("Товар не найден после сохранения")
+    return product
+
+
+def update_admin_product_api_sync(
+    product_id: int,
+    data: Dict[str, Any],
+) -> Dict[str, Any]:
+    if not isinstance(data, dict):
+        raise ValueError("Некорректные данные товара")
+
+    with get_db_connection() as connection:
+        product = connection.execute(
+            "SELECT id FROM products WHERE id = ?",
+            (product_id,),
+        ).fetchone()
+        if product is None:
+            raise ValueError("Товар не найден")
+
+        fields: List[str] = []
+        params: List[Any] = []
+        if "name" in data:
+            name = clean_admin_text(data.get("name"), 120)
+            if not name:
+                raise ValueError("Укажите название товара")
+            fields.append("name = ?")
+            params.append(name)
+        if "description" in data:
+            fields.append("description = ?")
+            params.append(clean_admin_text(data.get("description"), 1000))
+        if "composition" in data:
+            fields.append("composition = ?")
+            params.append(clean_admin_text(data.get("composition"), 1000))
+        if any(key in data for key in ("category_id", "category_slug", "product_type", "productType", "category", "collection")):
+            fields.append("category_id = ?")
+            params.append(admin_category_id_from_payload(connection, data))
+        if "is_active" in data or "active" in data:
+            active = admin_bool(data.get("is_active", data.get("active")), True)
+            fields.append("is_active = ?")
+            params.append(1 if active else 0)
+            if not active:
+                connection.execute(
+                    "DELETE FROM featured_products WHERE product_id = ?",
+                    (product_id,),
+                )
+                _normalize_featured_positions_sync(connection)
+
+        if fields:
+            params.append(product_id)
+            connection.execute(
+                """
+                UPDATE products
+                SET {fields}, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """.format(fields=", ".join(fields)),
+                params,
+            )
+
+        if "image_url" in data or "image" in data:
+            set_product_primary_image_value_sync(
+                connection,
+                product_id,
+                data.get("image_url", data.get("image", "")),
+            )
+
+        if "variants" in data or "prices" in data or any(key in data for key in ("base_price", "basePrice", "price")):
+            variants = normalize_admin_product_variants(data)
+            base_price = replace_product_variants_sync(
+                connection,
+                product_id,
+                variants,
+            )
+            connection.execute(
+                """
+                UPDATE products
+                SET base_price = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (base_price, product_id),
+            )
+
+        if "is_featured" in data or "featured" in data:
+            set_product_featured_value_sync(
+                connection,
+                product_id,
+                admin_bool(data.get("is_featured", data.get("featured")), False),
+            )
+
+        connection.commit()
+    product = get_admin_product_api_sync(product_id)
+    if product is None:
+        raise ValueError("Товар не найден после сохранения")
+    return product
+
+
+def get_admin_product_api_sync(product_id: int) -> Optional[Dict[str, Any]]:
+    with get_db_connection() as connection:
+        product = connection.execute(
+            """
+            SELECT
+                products.id,
+                products.category_id,
+                products.name,
+                products.slug,
+                products.description,
+                products.composition,
+                products.base_price,
+                products.image_url,
+                products.badge,
+                products.is_active,
+                products.created_at,
+                products.updated_at,
+                featured_products.position AS featured_position,
+                categories.name AS category_name,
+                categories.slug AS category_slug
+            FROM products
+            LEFT JOIN categories ON categories.id = products.category_id
+            LEFT JOIN featured_products
+                ON featured_products.product_id = products.id
+            WHERE products.id = ?
+            """,
+            (product_id,),
+        ).fetchone()
+        if product is None:
+            return None
+        variants = connection.execute(
+            """
+            SELECT id, name, price, is_default, is_active
+            FROM product_variants
+            WHERE product_id = ? AND is_active = 1
+            ORDER BY is_default DESC, id ASC
+            """,
+            (product_id,),
+        ).fetchall()
+        addons = connection.execute(
+            """
+            SELECT addons.id, addons.name, addons.price, addons.image_url
+            FROM addons
+            JOIN product_addons ON product_addons.addon_id = addons.id
+            WHERE product_addons.product_id = ?
+              AND addons.is_active = 1
+            ORDER BY addons.id ASC
+            """,
+            (product_id,),
+        ).fetchall()
+        images = connection.execute(
+            """
+            SELECT image_url, position, is_primary
+            FROM product_images
+            WHERE product_id = ?
+            ORDER BY is_primary DESC, position ASC, id ASC
+            """,
+            (product_id,),
+        ).fetchall()
+
+    data = _public_product_from_rows(product, variants, addons, images)
+    data["is_active"] = bool(product["is_active"])
+    data["active"] = bool(product["is_active"])
+    data["updated_at"] = product["updated_at"]
+    return data
+
+
+def get_admin_products_api_sync() -> List[Dict[str, Any]]:
+    with get_db_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT id
+            FROM products
+            ORDER BY id DESC
+            """
+        ).fetchall()
+    return [
+        product
+        for product_id in [int(row["id"]) for row in rows]
+        for product in [get_admin_product_api_sync(product_id)]
+        if product is not None
+    ]
+
+
+def replace_featured_products_api_sync(product_ids: List[int]) -> List[Dict[str, Any]]:
+    unique_ids: List[int] = []
+    seen: Set[int] = set()
+    for value in product_ids:
+        try:
+            product_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if product_id <= 0 or product_id in seen:
+            continue
+        unique_ids.append(product_id)
+        seen.add(product_id)
+
+    with get_db_connection() as connection:
+        if unique_ids:
+            rows = connection.execute(
+                "SELECT id FROM products WHERE is_active = 1 AND id IN ({0})".format(
+                    ",".join("?" for _ in unique_ids)
+                ),
+                unique_ids,
+            ).fetchall()
+            valid_ids = {int(row["id"]) for row in rows}
+        else:
+            valid_ids = set()
+
+        connection.execute("DELETE FROM featured_products")
+        for position, product_id in enumerate(unique_ids):
+            if product_id not in valid_ids:
+                continue
+            connection.execute(
+                "INSERT INTO featured_products(product_id, position) VALUES (?, ?)",
+                (product_id, position),
+            )
+        _normalize_featured_positions_sync(connection)
+        connection.commit()
+    return get_admin_products_api_sync()
+
+
+async def require_admin_api(
+    request: web.Request,
+    payload: Any = None,
+) -> Tuple[Optional[Dict[str, Any]], Optional[web.Response]]:
+    try:
+        auth = validate_telegram_init_data(request_init_data(request, payload))
+    except ValueError as error:
+        return None, api_json({"error": str(error)}, 401)
+
+    admin_id = int(auth["user"]["id"])
+    if not user_is_admin(admin_id):
+        return None, api_json({"error": "Доступ запрещён"}, 403)
+    return auth, None
+
+
+async def read_api_json_payload(request: web.Request) -> Dict[str, Any]:
+    try:
+        payload = await request.json()
+    except (json.JSONDecodeError, web.HTTPBadRequest) as error:
+        raise ValueError("Некорректный JSON") from error
+    if not isinstance(payload, dict):
+        raise ValueError("Некорректные данные")
+    return payload
+
+
+async def api_admin_products_handler(request: web.Request) -> web.Response:
+    _, error_response = await require_admin_api(request)
+    if error_response is not None:
+        return error_response
+    return api_json(await asyncio.to_thread(get_admin_products_api_sync))
+
+
+async def api_admin_featured_products_handler(request: web.Request) -> web.Response:
+    try:
+        payload = await read_api_json_payload(request)
+    except ValueError as error:
+        return api_json({"error": str(error)}, 400)
+
+    _, error_response = await require_admin_api(request, payload)
+    if error_response is not None:
+        return error_response
+
+    raw_ids = payload.get("product_ids") or payload.get("ids") or []
+    if not isinstance(raw_ids, list):
+        return api_json({"error": "Некорректный список товаров"}, 400)
+
+    try:
+        products = await asyncio.to_thread(
+            replace_featured_products_api_sync,
+            raw_ids,
+        )
+    except ValueError as error:
+        return api_json({"error": str(error)}, 400)
+    return api_json({"ok": True, "products": products})
+
+
+async def api_admin_main_hero_image_handler(request: web.Request) -> web.Response:
+    try:
+        payload = await read_api_json_payload(request)
+    except ValueError as error:
+        return api_json({"error": str(error)}, 400)
+
+    _, error_response = await require_admin_api(request, payload)
+    if error_response is not None:
+        return error_response
+
+    image = clean_admin_text(payload.get("main_hero_image"), 600000)
+    saved_image = await asyncio.to_thread(
+        set_setting_text_sync,
+        "main_hero_image",
+        image,
+    )
+    return api_json({"ok": True, "main_hero_image": saved_image})
+
+
 async def api_admin_create_product_handler(request: web.Request) -> web.Response:
-    data = await request.json()
-    product_id = await create_product_admin(data)
-    return web.json_response({"id": product_id})
+    try:
+        payload = await read_api_json_payload(request)
+    except ValueError as error:
+        return api_json({"error": str(error)}, 400)
+
+    _, error_response = await require_admin_api(request, payload)
+    if error_response is not None:
+        return error_response
+
+    try:
+        product = await asyncio.to_thread(create_admin_product_api_sync, payload)
+    except ValueError as error:
+        return api_json({"error": str(error)}, 400)
+    except Exception:
+        logging.exception("Ошибка API при создании товара")
+        return api_json({"error": "Не удалось сохранить товар"}, 500)
+
+    return api_json({"ok": True, "id": product["id"], "product": product}, 201)
 
 
 async def api_admin_delete_product_handler(request: web.Request) -> web.Response:
-    await delete_product(int(request.match_info["product_id"]))
-    return web.json_response({"ok": True})
+    try:
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            payload = {}
+    except Exception:
+        payload = {}
+
+    _, error_response = await require_admin_api(request, payload)
+    if error_response is not None:
+        return error_response
+
+    try:
+        await delete_product(int(request.match_info["product_id"]))
+    except ValueError as error:
+        return api_json({"error": str(error)}, 404)
+    except Exception:
+        logging.exception("Ошибка API при удалении товара")
+        return api_json({"error": "Не удалось удалить товар"}, 500)
+    return api_json({"ok": True})
 
 
 async def api_admin_update_product_handler(request: web.Request) -> web.Response:
-    product_id = int(request.match_info["product_id"])
-    data = await request.json()
-    if "name" in data:
-        await update_product_text(product_id, "name", data["name"])
-    if "description" in data:
-        await update_product_text(product_id, "description", data["description"])
-    if "composition" in data:
-        await update_product_text(product_id, "composition", data["composition"])
-    if "image_url" in data:
-        await update_product_text(product_id, "image_url", data["image_url"])
-    if "prices" in data:
-        await update_product_prices(product_id, data["prices"])
-    return web.json_response({"ok": True})
+    try:
+        product_id = int(request.match_info["product_id"])
+    except (KeyError, ValueError):
+        return api_json({"error": "Некорректный товар"}, 400)
+
+    try:
+        payload = await read_api_json_payload(request)
+    except ValueError as error:
+        return api_json({"error": str(error)}, 400)
+
+    _, error_response = await require_admin_api(request, payload)
+    if error_response is not None:
+        return error_response
+
+    try:
+        product = await asyncio.to_thread(
+            update_admin_product_api_sync,
+            product_id,
+            payload,
+        )
+    except ValueError as error:
+        return api_json({"error": str(error)}, 400)
+    except Exception:
+        logging.exception("Ошибка API при обновлении товара")
+        return api_json({"error": "Не удалось сохранить товар"}, 500)
+
+    return api_json({"ok": True, "product": product})
 
 
 def create_web_application(bot: Bot) -> web.Application:
@@ -6395,9 +7120,12 @@ def create_web_application(bot: Bot) -> web.Application:
     app.router.add_post("/api/orders", api_create_order_handler)
     app.router.add_post("/api/admin/mailings/send", api_admin_send_mailing_handler)
     app.router.add_put("/api/admin/settings/pickup-address", api_admin_pickup_address_handler)
+    app.router.add_put("/api/admin/settings/main-hero-image", api_admin_main_hero_image_handler)
+    app.router.add_get("/api/admin/products", api_admin_products_handler)
     app.router.add_post("/api/admin/products", api_admin_create_product_handler)
     app.router.add_put("/api/admin/products/{product_id:\\d+}", api_admin_update_product_handler)
     app.router.add_delete("/api/admin/products/{product_id:\\d+}", api_admin_delete_product_handler)
+    app.router.add_put("/api/admin/featured-products", api_admin_featured_products_handler)
     app.router.add_get("/api/media", api_media_handler)
     app.router.add_get("/", webapp_index_handler)
     app.router.add_get("/index.html", webapp_index_handler)

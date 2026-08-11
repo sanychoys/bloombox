@@ -70,7 +70,7 @@ const bottomPages = ["main", "search", "cart", "profile"];
 const adminWorkspacePages = ["admin-orders", "admin-products", "admin-customers", "admin-mailings", "admin-settings"];
 let userSession = { loaded: false, authenticated: false, isAdmin: false, stats: null };
 const DEFAULT_PICKUP_ADDRESS_LABEL = "Адрес самовывоза уточнит администратор";
-let appSettings = { pickupAddress: "" };
+let appSettings = { pickupAddress: "", mainHeroImage: "" };
 let savedPickupAddress = "";
 
 let activeProduct = null;
@@ -1207,7 +1207,9 @@ async function loadPublicSettings() {
     if (!response.ok) return;
     const data = await response.json();
     appSettings.pickupAddress = String(data.pickup_address || "").trim();
+    appSettings.mainHeroImage = String(data.main_hero_image || "").trim();
     applyPickupAddressToCheckout();
+    applyMainHeroImage();
     updateDeliveryFields();
   } catch (error) {
     console.warn("BloomBox settings:", error);
@@ -1406,6 +1408,176 @@ function localDateString(date = new Date()) {
   return `${year}-${month}-${day}`;
 }
 
+
+let deliveryCalendarMonthDate = null;
+let deliveryCalendarBodyOverflow = "";
+
+function parseLocalDate(value) {
+  const match = String(value || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]) - 1;
+  const day = Number(match[3]);
+  const date = new Date(year, month, day);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function calendarMonthStart(date = new Date()) {
+  return new Date(date.getFullYear(), date.getMonth(), 1);
+}
+
+function formatDeliveryDate(value) {
+  const date = parseLocalDate(value);
+  if (!date) return "Выберите дату";
+  return date.toLocaleDateString("ru-RU", {
+    day: "numeric",
+    month: "long",
+    weekday: "short"
+  });
+}
+
+function formatCalendarMonth(date) {
+  const label = date.toLocaleDateString("ru-RU", {
+    month: "long",
+    year: "numeric"
+  });
+  return label.charAt(0).toUpperCase() + label.slice(1);
+}
+
+function deliveryCalendarMinValue() {
+  return document.querySelector("#deliveryDate")?.min || localDateString();
+}
+
+function updateDeliveryDateDisplay() {
+  const input = document.querySelector("#deliveryDate");
+  const text = document.querySelector("#deliveryDateText");
+  if (!input || !text) return;
+  text.textContent = formatDeliveryDate(input.value);
+  if (!document.querySelector("#deliveryCalendarOverlay")?.hidden) {
+    renderDeliveryCalendar();
+  }
+}
+
+function setDeliveryDateValue(value, { close = false } = {}) {
+  const input = document.querySelector("#deliveryDate");
+  if (!input) return;
+  const min = deliveryCalendarMinValue();
+  input.value = value < min ? min : value;
+  input.dispatchEvent(new Event("change", { bubbles: true }));
+  updateDeliveryDateDisplay();
+  tg?.HapticFeedback?.selectionChanged?.();
+  if (close) closeDeliveryCalendar();
+}
+
+function openDeliveryCalendar() {
+  const overlay = document.querySelector("#deliveryCalendarOverlay");
+  const button = document.querySelector("#deliveryDateButton");
+  const input = document.querySelector("#deliveryDate");
+  if (!overlay || !button || !input) return;
+
+  const selectedDate = parseLocalDate(input.value) || parseLocalDate(input.min) || new Date();
+  deliveryCalendarMonthDate = calendarMonthStart(selectedDate);
+  renderDeliveryCalendar();
+
+  deliveryCalendarBodyOverflow = document.body.style.overflow;
+  document.body.style.overflow = "hidden";
+  overlay.hidden = false;
+  button.setAttribute("aria-expanded", "true");
+  window.requestAnimationFrame(() => document.querySelector("#deliveryCalendarDays button.is-selected:not(:disabled)")?.focus?.());
+}
+
+function closeDeliveryCalendar() {
+  const overlay = document.querySelector("#deliveryCalendarOverlay");
+  const button = document.querySelector("#deliveryDateButton");
+  if (!overlay || overlay.hidden) return;
+  overlay.hidden = true;
+  document.body.style.overflow = deliveryCalendarBodyOverflow;
+  button?.setAttribute("aria-expanded", "false");
+  button?.focus?.({ preventScroll: true });
+}
+
+function renderDeliveryCalendar() {
+  const days = document.querySelector("#deliveryCalendarDays");
+  const monthLabel = document.querySelector("#deliveryCalendarMonth");
+  const prevButton = document.querySelector("#deliveryCalendarPrev");
+  const input = document.querySelector("#deliveryDate");
+  if (!days || !monthLabel || !prevButton || !input) return;
+
+  const minValue = deliveryCalendarMinValue();
+  const minDate = parseLocalDate(minValue) || new Date();
+  const todayValue = localDateString();
+  const selectedValue = input.value;
+  const monthDate = calendarMonthStart(deliveryCalendarMonthDate || parseLocalDate(selectedValue) || minDate);
+  deliveryCalendarMonthDate = monthDate;
+
+  monthLabel.textContent = formatCalendarMonth(monthDate);
+  prevButton.disabled = monthDate <= calendarMonthStart(minDate);
+  days.innerHTML = "";
+
+  const firstWeekday = (monthDate.getDay() + 6) % 7;
+  for (let index = 0; index < firstWeekday; index += 1) {
+    days.append(document.createElement("span"));
+  }
+
+  const daysInMonth = new Date(monthDate.getFullYear(), monthDate.getMonth() + 1, 0).getDate();
+  for (let day = 1; day <= daysInMonth; day += 1) {
+    const date = new Date(monthDate.getFullYear(), monthDate.getMonth(), day);
+    const value = localDateString(date);
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = String(day);
+    button.dataset.calendarDate = value;
+    button.disabled = value < minValue;
+    button.classList.toggle("is-today", value === todayValue);
+    button.classList.toggle("is-selected", value === selectedValue);
+    button.setAttribute("aria-label", date.toLocaleDateString("ru-RU", {
+      day: "numeric",
+      month: "long",
+      year: "numeric",
+      weekday: "long"
+    }));
+    if (value === selectedValue) button.setAttribute("aria-current", "date");
+    days.append(button);
+  }
+}
+
+function shiftDeliveryCalendarMonth(direction) {
+  const base = deliveryCalendarMonthDate || calendarMonthStart(new Date());
+  deliveryCalendarMonthDate = new Date(base.getFullYear(), base.getMonth() + direction, 1);
+  renderDeliveryCalendar();
+}
+
+function initDeliveryCalendar() {
+  const button = document.querySelector("#deliveryDateButton");
+  const input = document.querySelector("#deliveryDate");
+  const prevButton = document.querySelector("#deliveryCalendarPrev");
+  const nextButton = document.querySelector("#deliveryCalendarNext");
+  const days = document.querySelector("#deliveryCalendarDays");
+  if (!button || !input) return;
+
+  button.addEventListener("click", openDeliveryCalendar);
+  input.addEventListener("change", updateDeliveryDateDisplay);
+  prevButton?.addEventListener("click", () => shiftDeliveryCalendarMonth(-1));
+  nextButton?.addEventListener("click", () => shiftDeliveryCalendarMonth(1));
+  days?.addEventListener("click", (event) => {
+    const dayButton = event.target.closest("[data-calendar-date]");
+    if (!dayButton || dayButton.disabled) return;
+    setDeliveryDateValue(dayButton.dataset.calendarDate, { close: true });
+  });
+  document.querySelectorAll("[data-calendar-close]").forEach((closeButton) => {
+    closeButton.addEventListener("click", closeDeliveryCalendar);
+  });
+  document.querySelectorAll("[data-calendar-preset]").forEach((presetButton) => {
+    presetButton.addEventListener("click", () => {
+      const base = presetButton.dataset.calendarPreset === "tomorrow"
+        ? new Date(Date.now() + 86400000)
+        : new Date();
+      setDeliveryDateValue(localDateString(base), { close: true });
+    });
+  });
+  updateDeliveryDateDisplay();
+}
+
 async function submitOrder(event) {
   event.preventDefault();
   document.querySelector("#formStatus").textContent = "";
@@ -1528,6 +1700,7 @@ function setDefaultFormValues() {
   const dateInput = document.querySelector("#deliveryDate");
   dateInput.min = localDateString();
   if (!dateInput.value) dateInput.value = localDateString(new Date(Date.now() + 86400000));
+  updateDeliveryDateDisplay();
   document.querySelector('input[name="delivery_type"][value="delivery"]').checked = true;
   updateDeliveryFields();
   updateRecipientFields();
@@ -1678,7 +1851,13 @@ async function hydrateProductsFromApi() {
     const response = await fetch("/api/products", { headers: { Accept: "application/json" }, cache: "no-store" });
     if (!response.ok) return;
     const apiProducts = await response.json();
-    if (!Array.isArray(apiProducts) || !apiProducts.length) return;
+    if (!Array.isArray(apiProducts)) return;
+    if (!apiProducts.length) {
+      products = [];
+      renderAllProducts();
+      renderCart();
+      return;
+    }
 
     const apiCatalogProducts = apiProducts.map((item, index) => {
       const fallback = fallbackProducts.find((product) => product.slug === item.slug) || fallbackProducts.find((product) => product.id === Number(item.id)) || fallbackProducts[index % fallbackProducts.length];
@@ -1714,23 +1893,7 @@ async function hydrateProductsFromApi() {
       });
     });
 
-    const presentTypes = new Set(
-      apiCatalogProducts.map((product) => product.productType)
-    );
-    const demoSupplements = fallbackProducts
-      .filter((product) => product.id >= 9000)
-      .filter((product) => !presentTypes.has(product.productType))
-      .map((product) => ({
-        ...product,
-        image: product.images[0],
-        active: true,
-        is_active: true,
-        isFeatured: false,
-        featuredPosition: null,
-        addons: []
-      }));
-
-    products = appendAdminCreatedProducts([...apiCatalogProducts, ...demoSupplements]).map((product) => mergeAdminOverride(product));
+    products = apiCatalogProducts.map((product) => mergeAdminOverride(product));
 
     cart.forEach((item) => {
       const product = products.find((candidate) => candidate.id === item.id);
@@ -2244,6 +2407,38 @@ function getTelegramInitData() {
   return tg?.initData || "";
 }
 
+async function adminFetchJson(url, { method = "GET", body = null } = {}) {
+  const initData = getTelegramInitData();
+  if (!initData) {
+    throw new Error("Откройте админку внутри Telegram Mini App");
+  }
+
+  const headers = {
+    Accept: "application/json",
+    "X-Telegram-Init-Data": initData
+  };
+  const options = {
+    method,
+    headers,
+    cache: "no-store"
+  };
+
+  if (body !== null) {
+    headers["Content-Type"] = "application/json";
+    options.body = JSON.stringify({
+      ...body,
+      init_data: initData
+    });
+  }
+
+  const response = await fetch(url, options);
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.error || "Не удалось выполнить действие");
+  }
+  return data;
+}
+
 function setAdminPickupAddressStatus(message = "", type = "") {
   const status = document.querySelector("#adminPickupAddressStatus");
   if (!status) return;
@@ -2602,24 +2797,11 @@ function defaultMainHeroImage() {
 }
 
 function readAdminMainHeroImage() {
-  try {
-    return String(localStorage.getItem(adminMainHeroImageKey) || "").trim();
-  } catch {
-    return "";
-  }
+  return String(appSettings.mainHeroImage || "").trim();
 }
 
 function saveAdminMainHeroImage(value) {
-  const image = String(value || "").trim();
-  try {
-    if (image) {
-      localStorage.setItem(adminMainHeroImageKey, image);
-    } else {
-      localStorage.removeItem(adminMainHeroImageKey);
-    }
-  } catch {
-    showToast("Не удалось сохранить главную картинку", "error");
-  }
+  appSettings.mainHeroImage = String(value || "").trim();
 }
 
 function currentMainHeroImage() {
@@ -2668,7 +2850,29 @@ async function setAdminMainHeroImageFromFile(file) {
   }
 }
 
-function saveAdminMainHeroImageDraft() {
+async function saveAdminMainHeroImageToDatabase(image) {
+  const initData = getTelegramInitData();
+  if (!initData) {
+    throw new Error("Откройте админку внутри Telegram Mini App");
+  }
+
+  const response = await fetch("/api/admin/settings/main-hero-image", {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Telegram-Init-Data": initData
+    },
+    body: JSON.stringify({
+      init_data: initData,
+      main_hero_image: image
+    })
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || "Не удалось сохранить главную картинку");
+  return String(data.main_hero_image || "").trim();
+}
+
+async function saveAdminMainHeroImageDraft() {
   const input = document.querySelector("#adminHeroImageInput");
   const nextImage = String(input?.value || adminHeroImageDraft || "").trim();
   if (!nextImage) {
@@ -2677,57 +2881,50 @@ function saveAdminMainHeroImageDraft() {
     return;
   }
 
-  saveAdminMainHeroImage(nextImage);
-  applyMainHeroImage(nextImage);
-  showToast("Главная картинка обновлена", "success");
-  tg?.HapticFeedback?.notificationOccurred?.("success");
+  try {
+    showToast("Сохраняю главную картинку…");
+    const savedImage = await saveAdminMainHeroImageToDatabase(nextImage);
+    saveAdminMainHeroImage(savedImage);
+    applyMainHeroImage(savedImage);
+    showToast("Главная картинка сохранена в базе", "success");
+    tg?.HapticFeedback?.notificationOccurred?.("success");
+  } catch (error) {
+    showToast(error.message || "Не удалось сохранить главную картинку", "error");
+    tg?.HapticFeedback?.notificationOccurred?.("error");
+  }
 }
 
-function resetAdminMainHeroImage() {
-  saveAdminMainHeroImage("");
-  applyMainHeroImage(defaultMainHeroImage());
-  const fileInput = document.querySelector("#adminHeroImageFile");
-  if (fileInput) fileInput.value = "";
-  showToast("Главная картинка сброшена", "success");
-  tg?.HapticFeedback?.selectionChanged?.();
+async function resetAdminMainHeroImage() {
+  try {
+    showToast("Сбрасываю главную картинку…");
+    const savedImage = await saveAdminMainHeroImageToDatabase("");
+    saveAdminMainHeroImage(savedImage);
+    applyMainHeroImage(defaultMainHeroImage());
+    const fileInput = document.querySelector("#adminHeroImageFile");
+    if (fileInput) fileInput.value = "";
+    showToast("Главная картинка сброшена в базе", "success");
+    tg?.HapticFeedback?.selectionChanged?.();
+  } catch (error) {
+    showToast(error.message || "Не удалось сбросить главную картинку", "error");
+    tg?.HapticFeedback?.notificationOccurred?.("error");
+  }
 }
 
 function readAdminProductOverrides() {
-  try {
-    const value = JSON.parse(localStorage.getItem(adminProductOverridesKey) || "{}");
-    return value && typeof value === "object" && !Array.isArray(value) ? value : {};
-  } catch {
-    return {};
-  }
+  return {};
 }
 
 function saveAdminProductOverrides() {
-  try {
-    localStorage.setItem(adminProductOverridesKey, JSON.stringify(adminProductOverrides));
-  } catch {
-    showToast("Не удалось сохранить изменения в браузере", "error");
-  }
+  adminProductOverrides = {};
 }
 
 
 function readAdminCreatedProducts() {
-  try {
-    const value = JSON.parse(localStorage.getItem(adminCreatedProductsKey) || "[]");
-    if (!Array.isArray(value)) return [];
-    return value
-      .map((product, index) => normalizeAdminProduct(product, fallbackProducts.length + index))
-      .filter((product) => product && product.id);
-  } catch {
-    return [];
-  }
+  return [];
 }
 
 function saveAdminCreatedProducts(productsToSave) {
-  try {
-    localStorage.setItem(adminCreatedProductsKey, JSON.stringify(productsToSave || []));
-  } catch {
-    showToast("Не удалось сохранить новый товар в браузере", "error");
-  }
+  void productsToSave;
 }
 
 function appendAdminCreatedProducts(source = []) {
@@ -2985,53 +3182,26 @@ function getAdminFeaturedIds() {
   return getSortedFeaturedProducts().map((product) => Number(product.id)).filter(Boolean);
 }
 
-function setAdminFeaturedIds(ids, { silent = false } = {}) {
+async function setAdminFeaturedIds(ids, { silent = false } = {}) {
   const uniqueIds = [...new Set(ids.map(Number).filter(Boolean))];
-  const positionMap = new Map(uniqueIds.map((id, index) => [id, index]));
-  const sourceIds = new Set(getAdminProductSource().map((product) => Number(product.id)).filter(Boolean));
-  const validIds = uniqueIds.filter((id) => sourceIds.has(id));
-  const validPositionMap = new Map(validIds.map((id, index) => [id, index]));
-
-  getAdminProductSource().forEach((product) => {
-    const id = Number(product.id);
-    if (!id) return;
-
-    const featured = validPositionMap.has(id);
-    const position = featured ? validPositionMap.get(id) : null;
-    const key = String(id);
-    adminProductOverrides[key] = {
-      ...(adminProductOverrides[key] || {}),
-      featured,
-      isFeatured: featured,
-      is_featured: featured,
-      featuredPosition: position,
-      featured_position: position
-    };
-  });
-
-  saveAdminProductOverrides();
-
-  const applyFeaturedState = (product) => {
-    const id = Number(product.id);
-    const featured = validPositionMap.has(id);
-    const position = featured ? validPositionMap.get(id) : null;
-    return mergeAdminOverride({
-      ...product,
-      featured,
-      isFeatured: featured,
-      is_featured: featured,
-      featuredPosition: position,
-      featured_position: position
+  try {
+    showToast("Сохраняю витрину в базу…");
+    const data = await adminFetchJson("/api/admin/featured-products", {
+      method: "PUT",
+      body: { product_ids: uniqueIds }
     });
-  };
-
-  adminProductsCache = getAdminProductSource().map(applyFeaturedState);
-  products = products.map(applyFeaturedState);
-
-  renderAdminProductsList();
-  renderAllProducts();
-
-  if (!silent) showToast("Популярное обновлено", "success");
+    const rawProducts = Array.isArray(data.products) ? data.products : [];
+    if (rawProducts.length) {
+      adminProductsCache = rawProducts.map((product, index) => normalizeAdminProduct(product, index));
+    }
+    await hydrateProductsFromApi();
+    renderAdminProductsList();
+    renderAllProducts();
+    if (!silent) showToast("Популярное сохранено в базе", "success");
+  } catch (error) {
+    showToast(error.message || "Не удалось сохранить популярное", "error");
+    if (currentPage() === "admin-products") loadAdminProducts();
+  }
 }
 
 function toggleAdminProductFeatured(productId) {
@@ -3043,39 +3213,33 @@ function toggleAdminProductFeatured(productId) {
     ? ids.filter((item) => item !== id)
     : [...ids, id];
 
-  setAdminFeaturedIds(nextIds);
+  void setAdminFeaturedIds(nextIds);
   tg?.HapticFeedback?.selectionChanged?.();
 }
 
-function toggleAdminProductActive(productId) {
+async function toggleAdminProductActive(productId) {
   const id = Number(productId);
   if (!id) return;
 
   const currentProduct = getAdminProductById(id);
   const nextActive = !isProductActive(currentProduct);
-  const key = String(id);
 
-  adminProductOverrides[key] = {
-    ...(adminProductOverrides[key] || {}),
-    active: nextActive,
-    is_active: nextActive
-  };
-
-  saveAdminProductOverrides();
-
-  const applyActiveState = (product) => (
-    Number(product.id) === id
-      ? mergeAdminOverride({ ...product, active: nextActive, is_active: nextActive })
-      : mergeAdminOverride(product)
-  );
-
-  adminProductsCache = getAdminProductSource().map(applyActiveState);
-  products = products.map(applyActiveState);
-
-  renderAdminProductsList();
-  renderAllProducts();
-  showToast(nextActive ? "Товар снова в наличии" : "Товар скрыт с витрины", nextActive ? "success" : "info");
-  tg?.HapticFeedback?.selectionChanged?.();
+  try {
+    showToast(nextActive ? "Возвращаю товар на витрину…" : "Скрываю товар с витрины…");
+    const data = await adminFetchJson(`/api/admin/products/${id}`, {
+      method: "PUT",
+      body: { is_active: nextActive }
+    });
+    if (data.product) {
+      upsertAdminProductInMemory(data.product);
+    }
+    await refreshProductsAfterAdminSave();
+    showToast(nextActive ? "Товар снова в наличии" : "Товар скрыт с витрины", nextActive ? "success" : "info");
+    tg?.HapticFeedback?.selectionChanged?.();
+  } catch (error) {
+    showToast(error.message || "Не удалось изменить наличие", "error");
+    tg?.HapticFeedback?.notificationOccurred?.("error");
+  }
 }
 
 function renderAdminFeaturedManager() {
@@ -3204,16 +3368,23 @@ async function loadAdminProducts() {
     </article>`;
 
   try {
-    const response = await fetch("/api/products", {
-      headers: { Accept: "application/json" },
-      cache: "no-store"
-    });
-    if (!response.ok) throw new Error("products_unavailable");
-    const data = await response.json();
-    const rawProducts = Array.isArray(data) ? data : (data.products || []);
-    adminProductsCache = ensureAdminSupplementProducts(rawProducts);
+    if (getTelegramInitData()) {
+      const data = await adminFetchJson("/api/admin/products");
+      const rawProducts = Array.isArray(data) ? data : (data.products || []);
+      adminProductsCache = rawProducts.map((product, index) => normalizeAdminProduct(product, index));
+    } else {
+      const response = await fetch("/api/products", {
+        headers: { Accept: "application/json" },
+        cache: "no-store"
+      });
+      if (!response.ok) throw new Error("products_unavailable");
+      const data = await response.json();
+      const rawProducts = Array.isArray(data) ? data : (data.products || []);
+      adminProductsCache = ensureAdminSupplementProducts(rawProducts);
+    }
   } catch(e) {
     adminProductsCache = ensureAdminSupplementProducts(products);
+    showToast(e.message || "Не удалось загрузить товары из базы", "error");
   }
 
   renderAdminProductsList();
@@ -3652,60 +3823,85 @@ function showAdminProductConfirm(draft) {
   tg?.HapticFeedback?.impactOccurred?.("light");
 }
 
-function applyAdminProductDraft(draft) {
-  if (!draft || !draft.id) return;
-
-  const isCreatedProduct = adminEditorMode === "create" || draft.isCreatedByAdmin || Boolean(adminEditorOriginal?.isCreatedByAdmin);
-  const previousOverride = adminProductOverrides[String(draft.id)] || {};
-  adminProductOverrides[String(draft.id)] = {
-    ...previousOverride,
+function adminProductPayloadFromDraft(draft) {
+  return {
     name: draft.name,
-    category: draft.category,
-    collection: draft.collection,
-    productType: draft.productType,
-    image: draft.image,
-    image_url: draft.image,
-    images: draft.images,
     description: draft.description,
     composition: draft.composition,
-    variants: draft.variants,
-    variantsCount: draft.variantsCount,
-    imagesCount: draft.imagesCount,
-    basePrice: draft.basePrice,
-    base_price: draft.base_price,
-    price: draft.price,
-    min_price: draft.min_price,
-    active: draft.active,
-    is_active: draft.is_active,
-    updatedAt: draft.updatedAt,
-    isCreatedByAdmin: isCreatedProduct
+    image_url: draft.image || "",
+    product_type: draft.productType || "bouquets",
+    category: draft.category || draft.collection || productTypeLabel(draft),
+    is_active: draft.active !== false,
+    is_featured: Boolean(draft.featured),
+    variants: draft.variants.map((variant, index) => ({
+      id: variant.id || null,
+      name: variant.name,
+      price: Number(variant.price) || 0,
+      is_default: index === 0 || Boolean(variant.is_default)
+    }))
   };
-  saveAdminProductOverrides();
+}
 
-  if (isCreatedProduct) {
-    upsertAdminCreatedProduct(draft);
-  }
-
-  const applyDraftToList = (list) => {
-    const normalizedDraft = mergeAdminOverride(normalizeAdminProduct(draft, list.length));
+function upsertAdminProductInMemory(product) {
+  const normalizedProduct = normalizeAdminProduct(product, adminProductsCache.length);
+  const upsert = (list) => {
     let found = false;
-    const next = list.map((product) => {
-      if (Number(product.id) !== Number(draft.id)) return mergeAdminOverride(product);
+    const next = list.map((item) => {
+      if (Number(item.id) !== Number(normalizedProduct.id)) return normalizeAdminProduct(item);
       found = true;
-      return mergeAdminOverride({ ...product, ...normalizedDraft });
+      return normalizedProduct;
     });
-    if (!found) next.push(normalizedDraft);
+    if (!found) next.push(normalizedProduct);
     return next;
   };
+  adminProductsCache = upsert(getAdminProductSource());
+  products = upsert(products).filter((item) => isProductActive(item));
+}
 
-  adminProductsCache = applyDraftToList(getAdminProductSource());
-  products = applyDraftToList(products);
-
-  renderAdminProductsList();
+async function refreshProductsAfterAdminSave() {
+  await hydrateProductsFromApi();
+  if (currentPage() === "admin-products") {
+    await loadAdminProducts();
+  }
   renderAllProducts();
-  closeAdminProductEditor();
-  showToast(isCreatedProduct ? "Товар добавлен" : "Изменения применены", "success");
-  tg?.HapticFeedback?.notificationOccurred?.("success");
+  renderCart();
+}
+
+async function applyAdminProductDraft(draft) {
+  if (!draft || !draft.id) return;
+
+  const saveButton = document.querySelector("#adminProductConfirmSave");
+  const isCreatedProduct = adminEditorMode === "create" || draft.isCreatedByAdmin || Boolean(adminEditorOriginal?.isCreatedByAdmin);
+  const payload = adminProductPayloadFromDraft(draft);
+
+  try {
+    if (saveButton) {
+      saveButton.disabled = true;
+      saveButton.textContent = "Сохраняю…";
+    }
+    showToast("Сохраняю товар в базу…");
+
+    const data = isCreatedProduct
+      ? await adminFetchJson("/api/admin/products", { method: "POST", body: payload })
+      : await adminFetchJson(`/api/admin/products/${Number(draft.id)}`, { method: "PUT", body: payload });
+
+    if (data.product) {
+      upsertAdminProductInMemory(data.product);
+    }
+
+    await refreshProductsAfterAdminSave();
+    closeAdminProductEditor();
+    showToast(isCreatedProduct ? "Товар добавлен в базу" : "Изменения сохранены в базе", "success");
+    tg?.HapticFeedback?.notificationOccurred?.("success");
+  } catch (error) {
+    showToast(error.message || "Не удалось сохранить товар", "error");
+    tg?.HapticFeedback?.notificationOccurred?.("error");
+  } finally {
+    if (saveButton) {
+      saveButton.disabled = false;
+      saveButton.textContent = "Подтверждаю";
+    }
+  }
 }
 
 document.querySelectorAll("[data-admin-back]").forEach(btn => {
@@ -4357,6 +4553,10 @@ document.addEventListener("click", (event) => {
 });
 
 document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !document.querySelector("#deliveryCalendarOverlay")?.hidden) {
+    closeDeliveryCalendar();
+    return;
+  }
   if (event.key === "Escape" && !document.querySelector("#adminProductEditor")?.hidden) {
     closeAdminProductEditor();
     return;
@@ -4383,6 +4583,7 @@ document.addEventListener("keydown", (event) => {
 
 initTelegram();
 applyTelegramUser();
+initDeliveryCalendar();
 setDefaultFormValues();
 applyMainHeroImage();
 products = appendAdminCreatedProducts(products).map((product) => mergeAdminOverride(product));
